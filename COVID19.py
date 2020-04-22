@@ -23,20 +23,120 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parameter import Parameter
 import country_converter as coco
+import gc
 
 def flushPrint(variable):
     sys.stdout.write('\r')
     sys.stdout.write('%s' % variable)
     sys.stdout.flush()
+    
+# 上述微分方程模拟器，分成了两个，一个是多节点有网络的，底下的是单一节点的
+def intervention(parameters,t):
+    epsilon = parameters['epsilon']
+    lambd = parameters['lambds']
+    t0 = parameters['t0s']
+    tstar = parameters['tstar']
+    lambd2 = parameters['lambds2']
+    exp1 = np.exp(lambd * (t - t0) - np.log(1/epsilon-1))
+    decay = 1/(1+exp1)
+    if tstar>0:
+        #tstar = x0 + np.log((1-relax*epsilon)/(relax*epsilon+eta-1))
+        exp2 = np.exp(lambd * (2*tstar - t - t0) - np.log(1/epsilon-1))
+        decay1 += 1/(1+exp2)
+    return decay
+def np_ode(states, t, parameters, fijt, population):
+    #print(t, states[0])
+    sz = states.shape[0] // 5
+    us = states[:sz]
+    cs = states[sz:2*sz]
+    ss = states[2*sz:3*sz]
+    interval = parameters['interval']
+    tidx = int(t * interval)
+    if tidx >= len(fijt):
+        fij = fijt[len(fijt)-1]
+    else:
+        fij = fijt[tidx]
+    uterm = (us * population).dot(fij) / population - us * np.sum(fij,1)
+    sterm = (ss * population).dot(fij) / population - ss * np.sum(fij,1)
+    beta = parameters['beta']
+    t_c = parameters['tc']
+    t_r = parameters['tr']
+    alphas = parameters['alphas']
+    cross_term = beta * us * ss * intervention(parameters, t)
+    #cross_term = beta * us * ss
+    delta_u = cross_term - us / t_c + uterm
+    delta_c = alphas * us / t_c - cs / t_r 
+    delta_s = - cross_term + sterm
+    domestic = cross_term
+    virus_influx = (us * population).dot(fij) / population
+    output = np.r_[delta_u, delta_c, delta_s, virus_influx, domestic]
+    #records1.append(np.r_[delta_u, delta_c, delta_s])
+    #records2.append(np.r_[us, cs, ss])
+    return output
+def single_np_ode(state, t, parameters, population):
+    us = state[0]
+    cs = state[1]
+    ss = state[2]
+    beta = parameters['beta']
+    t_c = parameters['tc']
+    t_r = parameters['tr']
+    alpha = parameters['alpha']
+    cross_term = beta * us * ss * intervention(parameters, t)
+    
+    delta_u = cross_term - us / t_c
+    delta_c = alpha * us / t_c - cs / t_r 
+    delta_s = - cross_term
+    output = np.r_[delta_u, delta_c, delta_s]
+    return output
+    
 
 class COVID19:
-    def __init__(self, flowdata='data/country_flow/', casedata='data/global0415_en.csv', populationdata='data/country_population.csv'):
+    def __init__(self, flowdata='data/country_flow/', casedata='data/global0415_en.csv', \
+                 populationdata='data/country_population.csv', print_t0s=False, loadpath=False):
         # 首先，我们要校准各个国家的名称，做法是分别把航空流量数据、国家人口数据和病例数据中的国家字段都加载进来，统一转换为标准国家名称
         # flow data
-        self._name_combine(flowdata, casedata, populationdata)
-        self._read_pop(populationdata)
-        self._read_flow_dynamics(flowdata)
-        self._read_case_data(casedata)
+        if not loadpath:
+            self._name_combine(flowdata, casedata, populationdata)
+            self._read_pop(populationdata)
+            self._read_flow_dynamics(flowdata)
+            self._read_case_data(casedata)
+            self._find_t0s(print_t0s)
+        else:
+            if loadpath=='auto':
+                self.loaddata('all_data_4_15.pkl')
+            else:
+                self.loaddata(loadpath)
+    def loaddata(self, loadpath):
+        f=open(loadpath, 'rb')
+        output = pickle.load(f)
+        f.close()
+        self.all_cumconfirm_cases = output['cases'][0]
+        self.all_cumexist_cases = output['cases'][1]
+        self.first_cases = output['cases'][2]
+        self.first_date = output['cases'][3]
+        self.start_date = output['cases'][4]
+        self.time_cases = output['cases'][5]
+        self.nodes = output['nodes']
+        self.population = output['population']
+        self.fijt = output['fijt']
+        
+    def loadfit(self, path='logs/inidividual_parameters_4_15_log_lambda.pkl'):
+        # 导入拟合参数
+        f=open(path, 'rb')
+        self.aaa = pickle.load(f)
+        f.close()
+        
+    def fitted_data(self):
+        return self.aaa
+    
+    def save_data(self, path='all_data_4_15.pkl'):
+        output = {'cases':[self.all_cumconfirm_cases, self.all_cumexist_cases, \
+                           self.first_cases, self.first_date, self.start_date, self.time_cases],\
+                  't0s': self.t0s, 'nodes': self.nodes, \
+                  'population': self.population, 'fijt': self.fijt}
+        f = open(path, 'wb')
+        pickle.dump(output, f, pickle.HIGHEST_PROTOCOL)
+        f.close()
         
     def _name_combine(self, flowdata, casedata, populationdata):
         # 首先，我们要校准各个国家的名称，做法是分别把航空流量数据、国家人口数据和病例数据中的国家字段都加载进来，统一转换为标准国家名称
@@ -193,13 +293,13 @@ class COVID19:
                             all_cued_cases[day, self.nodes[ccc]] += cued_cases[i]
                             all_death_cases[day, self.nodes[ccc]] += die_cases[i]
 
-        time_cases = np.arange(day_len) - (self.first_date - self.start_date).days
+        self.time_cases = np.arange(day_len) - (self.first_date - self.start_date).days
         self.all_cumconfirm_cases = np.cumsum(all_confirmed_cases, 0) - np.cumsum(all_cued_cases, 0) - np.cumsum(all_death_cases, 0)
         self.all_cumexist_cases = np.cumsum(all_confirmed_cases, 0)
         for i in range(self.all_cumconfirm_cases.shape[1]):
             yy = self.all_cumconfirm_cases[:, i]
             bools = yy>0
-            plt.semilogy(time_cases[bools], yy[bools],'.')
+            plt.semilogy(self.time_cases[bools], yy[bools],'.')
         plt.show()
 
 
@@ -220,3 +320,125 @@ class COVID19:
         #5、targets，是一个Tensor，time_length*2*国家数维度，将all_cumconfirm_cases和all_cumexist_cases合并到了一起，作为训练的target
         #6、mask：是一个Tensor，time_length*2*国家数维度，0-1矩阵，记录了targets是否>0的情况
         #7、first_cases: 在2019年12月1日，中国的确诊病例数
+    def _find_t0s(self, print_t0s):
+        # 从现存确诊病例曲线上，推测出曲线开始下降的时间点，每个国家都不同
+        self.t0s = np.ones(len(self.nodes)) * self.all_cumconfirm_cases.shape[0]
+        for c,i in self.nodes.items():
+            #flushPrint(i)
+            curve = self.all_cumconfirm_cases[:,i]
+
+            if max(curve)>0:
+                maxv = max(curve)
+                indx = np.nonzero(curve == maxv)[0]
+                if print_t0s:
+                    print(c,indx)
+                    plt.semilogy(curve,'.')
+                if indx[-1] < len(curve) - 1:
+                    xs = np.ones(100) * indx[-1]
+                    ys = np.logspace(0, 5, 100)
+                    self.t0s[i] = indx[-1] - 5
+                    if print_t0s:
+                        plt.semilogy(xs, ys)
+                if print_t0s:
+                    plt.show()
+        #输出一个数组t0s，记录了每个国家开始下降的时间点，如果没有下降，则为最后的时间点。
+    def clear_simulation(self):
+        del self.all_trajectories
+        gc.collect()
+        
+    def simulate(self):
+        # 模拟所有国家的感染
+        t_c = 8.3
+        t_r = 9.2
+        r0 = 2.3
+        initials = np.zeros(len(self.nodes))
+        alphas = np.zeros(len(self.nodes))
+        betas = np.zeros(len(self.nodes))
+        lambds = np.zeros(len(self.nodes))
+        t0s = np.zeros(len(self.nodes))
+        for i,(c,v) in enumerate(self.aaa.items()):
+            initials[self.nodes[c]] = v['initial_unconfirmed'][0]
+            alphas[self.nodes[c]]=v['alphas'][0]
+            betas[self.nodes[c]]=v['betas'][0]
+            t0s[self.nodes[c]]=v['t0s'][0]
+            lambds[self.nodes[c]]=v['lambds'][0]
+
+        self.all_trajectories = np.zeros([self.all_cumconfirm_cases.shape[0], self.all_cumconfirm_cases.shape[1], 3])
+        epidemic_start_time = np.zeros(len(self.nodes))
+        for c,i in self.nodes.items():
+            #print(c)
+            cumconfirm = np.nonzero(self.all_cumconfirm_cases[:,i])[0]
+            if len(cumconfirm)> 0 :
+                first_t = cumconfirm[0]
+                epidemic_start_time[i] = first_t
+                timeline = len(self.time_cases) - first_t
+                timespan = np.linspace(0, timeline, timeline)
+                cases_data = self.all_cumconfirm_cases[first_t:, i]
+                cs0 = cases_data[0] / self.population[i]
+                us0 = initials[i] / self.population[i]
+                ss0 = 1 - cs0 - us0
+                initial_state = np.r_[us0, cs0, ss0]
+                t0ss = t0s[i] - first_t
+                constants = {'beta': r0 / t_c, 'tc': t_c, 'tr': t_r, 'interval': 1,'tstar':0,'epsilon':0.001,'lambds2':0}
+                constants['beta'] = betas[i]
+                constants['alpha'] = alphas[i]
+                constants['t0s'] = t0s[i]
+                constants['lambds'] = lambds[i]
+
+                result = odeint(single_np_ode, initial_state, timespan, args = (constants, self.population))
+                partt = alphas[i] * result[:, 0] / (constants['tc'] * constants['interval'])
+                partt = np.cumsum(partt)
+                self.all_trajectories[first_t:len(self.time_cases), i, 0:2] = result[:, 0:2]
+                self.all_trajectories[first_t:len(self.time_cases), i, 2] = partt
+                #plt.semilogy(first_t + timespan, result[:, 1] * self.population[i])
+                #plt.semilogy(np.linspace(1,len(self.time_cases), len(self.time_cases)), self.all_cumexist_cases[:, i],'.')
+                #plt.semilogy(first_t + timespan, partt * self.population[i])
+                #plt.semilogy(np.linspace(1,len(self.time_cases), len(self.time_cases)), self.all_cumconfirm_cases[:, i],'.')
+                #plt.show()
+
+        #输出一个数组all_trajectories，格式time_length*国家数*3，记录了任意时刻任意国家的未确诊、确诊和累积现存病例数
+        # 以all_trajectories最后一个时刻所记录的数据作为初始条件，开始模拟每个国家的增长情况
+        t_c = 8.3
+        t_r = 9.2
+        r0 = 2.3
+
+        timespan = np.linspace(len(self.time_cases), len(self.fijt), len(self.fijt) - len(self.time_cases))
+        constants = {'beta': r0 / t_c, 'tc': t_c, 'tr': t_r, 'interval': 1,'tstar':0,'epsilon':0.001,'lambds2':0}
+
+
+        us00 = self.all_trajectories[-1, :,0]
+        cs00 = self.all_trajectories[-1, :,1]
+        ss00 = 1 - us00 - cs00
+        virus_influx0 = np.zeros(len(self.nodes))
+        domestic_flux0 = np.zeros(len(self.nodes))
+        initial_states = np.r_[us00,cs00,ss00,virus_influx0,domestic_flux0]
+        params = constants
+        params['beta'] = betas
+        params['alphas'] = alphas
+        params['t0s'] = t0s + epidemic_start_time
+        params['lambds'] = lambds
+        self.result = odeint(np_ode, initial_states, timespan, args = (params, self.fijt, self.population))
+
+
+    def plot_simulation(self,\
+                        countries=['China','United States','United Kingdom','France','Italy','Spain','Iran','Japan','Mexico','South Africa']):
+        # 挑选了若干个代表性国家，绘制它们的疫情增长曲线
+        plt.figure(figsize = (15,10))
+        colors = plt.cm.jet(np.linspace(0,1,len(countries)))
+        plot_time = np.linspace(0, len(self.fijt), len(self.fijt)-1)
+
+        for i,country in enumerate(countries):
+            row = self.nodes.get(country, -1)
+            pop = self.population[self.nodes[country]]
+            #try:
+            show = np.r_[self.all_trajectories[:, row, 1] ,self.result[1:, len(self.nodes)+row]]
+            show = show * pop
+            #show = result[:,  row] * pop
+            plt.semilogy(plot_time-(self.first_date - self.start_date).days, show, '-', color = colors[i], label=country)
+            plt.semilogy(np.arange(self.all_cumconfirm_cases.shape[0])-(self.first_date - self.start_date).days
+                         , self.all_cumconfirm_cases[:, row], 'o', color = colors[i])
+
+
+        plt.legend(loc='upper left', shadow=True, numpoints = 1,fontsize=10)
+        plt.ylim([1, 10**10])
+        plt.show()
