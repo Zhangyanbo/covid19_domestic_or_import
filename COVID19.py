@@ -106,6 +106,9 @@ class COVID19:
                 self.loaddata('all_data_4_15.pkl')
             else:
                 self.loaddata(loadpath)
+        self.simulateQ = False
+        self.compute_influence_matrixQ=False
+
     def loaddata(self, loadpath):
         f=open(loadpath, 'rb')
         output = pickle.load(f)
@@ -137,7 +140,42 @@ class COVID19:
         f = open(path, 'wb')
         pickle.dump(output, f, pickle.HIGHEST_PROTOCOL)
         f.close()
-        
+    def compute_influence_matrix(self):
+        # 计算任意国家到任意国家的病例输入数据
+        if not self.simulateQ:
+            print('run self.simulate() before run self.compute_influence_matrix()')
+            return -1
+        self.influence_matrix = []
+        for t in range(self.result.shape[0]):
+            fluxmatrix = [row * self.population[i]  for i,row in enumerate(self.fijt[t])]
+            aa=np.transpose(np.repeat(np.array([self.result[t,:len(self.nodes)]]), len(self.nodes), axis=0))
+            i2j_virus_flux = aa*fluxmatrix
+            self.influence_matrix.append(i2j_virus_flux)
+        self.compute_influence_matrixQ=True
+    
+    def plot_exports(self, names=['United States', 'United Kingdom']):
+        if not self.compute_influence_matrixQ:
+            print('run compute_influence_matrix() before run plot_influence_matrix()')
+            return -1
+        plots=[[] for i in names]
+
+        for t in range(len(self.influence_matrix)):
+            for i, name in zip(range(len(names)),names):
+                plots[i].append(self._export(name, t))
+        for ploty in plots:
+            plt.semilogy(ploty)
+        plt.show()
+    
+    def _export(self, name, t):
+        if not self.compute_influence_matrixQ:
+            print('run compute_influence_matrix() before run this')
+            return -1
+        return self.influence_matrix[t][self.nodes[name],:].sum()
+
+    def _import(self, name):
+        # TODO
+        return -1
+
     def _name_combine(self, flowdata, casedata, populationdata):
         # 首先，我们要校准各个国家的名称，做法是分别把航空流量数据、国家人口数据和病例数据中的国家字段都加载进来，统一转换为标准国家名称
         # flow data
@@ -418,6 +456,7 @@ class COVID19:
         params['t0s'] = t0s + epidemic_start_time
         params['lambds'] = lambds
         self.result = odeint(np_ode, initial_states, timespan, args = (params, self.fijt, self.population))
+        self.simulateQ = True
 
 
     def plot_simulation(self,\
