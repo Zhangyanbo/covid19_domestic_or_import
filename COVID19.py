@@ -74,9 +74,9 @@ def np_ode(states, t, parameters, fijt, population):
     #records2.append(np.r_[us, cs, ss])
     return output
 def single_np_ode(state, t, parameters, population):
-    us = state[0]
-    cs = state[1]
-    ss = state[2]
+    us = state[0] # un-comfirmed cases?
+    cs = state[1] # comfirmed cases?
+    ss = state[2] # suspectable cases?
     beta = parameters['beta']
     t_c = parameters['tc']
     t_r = parameters['tr']
@@ -121,7 +121,7 @@ class COVID19:
         self.time_cases = output['cases'][5]
         self.nodes = output['nodes']
         self.population = output['population']
-        self.fijt = output['fijt']
+        self.fijt = output['fijt'] #t时刻流量矩阵
         
     def loadfit(self, path='logs/inidividual_parameters_4_15_log_lambda.pkl'):
         # 导入拟合参数
@@ -141,17 +141,19 @@ class COVID19:
         pickle.dump(output, f, pickle.HIGHEST_PROTOCOL)
         f.close()
     def compute_influence_matrix(self):
-        # 计算任意国家到任意国家的病例输入数据
+        # 计算任意国家到任意国家的病例输出/输出数据
         if not self.simulateQ:
             print('run self.simulate() before run self.compute_influence_matrix()')
             return -1
         self.influence_matrix = []
         for t in range(self.result.shape[0]):
-            fluxmatrix = [row * self.population[i]  for i,row in enumerate(self.fijt[t])]
-            aa=np.transpose(np.repeat(np.array([self.result[t,:len(self.nodes)]]), len(self.nodes), axis=0))
-            i2j_virus_flux = aa*fluxmatrix
+            fluxmatrix = [row * self.population[i]  for i,row in enumerate(self.fijt[t])] #i国人口 * 流出比例 --> 绝对流出人口
+            aa=np.transpose(np.repeat(np.array([self.result[t,:len(self.nodes)]]), len(self.nodes), axis=0)) # 未确诊感染比例
+            i2j_virus_flux = aa*fluxmatrix # aa[i,j] * fijt[t][i,j] = aa[i] * fijt[t][i-->j]
+            # i2j_virus_flux[i-->j] = i国向j国输出的病例数
             self.influence_matrix.append(i2j_virus_flux)
-        self.compute_influence_matrixQ=True
+        self.influence_matrix = np.array(self.influence_matrix) # 转成numpy格式
+        self.compute_influence_matrixQ=True #标记为已计算
     
     def plot_exports(self, names=['United States', 'United Kingdom']):
         if not self.compute_influence_matrixQ:
@@ -162,8 +164,23 @@ class COVID19:
         for t in range(len(self.influence_matrix)):
             for i, name in zip(range(len(names)),names):
                 plots[i].append(self._export(name, t))
-        for ploty in plots:
-            plt.semilogy(ploty)
+        for name, ploty in zip(names,plots):
+            plt.semilogy(ploty, label=name)
+        plt.legend(loc='upper right', shadow=True, numpoints = 1,fontsize=10)
+        plt.show()
+    
+    def plot_imports(self, names=['United States', 'United Kingdom']):
+        if not self.compute_influence_matrixQ:
+            print('run compute_influence_matrix() before run plot_influence_matrix()')
+            return -1
+        plots=[[] for i in names]
+
+        for t in range(len(self.influence_matrix)):
+            for i, name in zip(range(len(names)),names):
+                plots[i].append(self._import(name, t))
+        for name, ploty in zip(names,plots):
+            plt.semilogy(ploty, label=name)
+        plt.legend(loc='upper right', shadow=True, numpoints = 1,fontsize=10)
         plt.show()
     
     def _export(self, name, t):
@@ -172,9 +189,13 @@ class COVID19:
             return -1
         return self.influence_matrix[t][self.nodes[name],:].sum()
 
-    def _import(self, name):
+    def _import(self, name, t):
+        if not self.compute_influence_matrixQ:
+            print('run compute_influence_matrix() before run this')
+            return -1
+        return self.influence_matrix[t].T[self.nodes[name],:].sum()
         # TODO
-        return -1
+        #return -1
 
     def _name_combine(self, flowdata, casedata, populationdata):
         # 首先，我们要校准各个国家的名称，做法是分别把航空流量数据、国家人口数据和病例数据中的国家字段都加载进来，统一转换为标准国家名称
