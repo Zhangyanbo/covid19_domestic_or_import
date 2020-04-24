@@ -42,37 +42,8 @@ def intervention(parameters,t):
     if tstar>0:
         #tstar = x0 + np.log((1-relax*epsilon)/(relax*epsilon+eta-1))
         exp2 = np.exp(lambd * (2*tstar - t - t0) - np.log(1/epsilon-1))
-        decay1 += 1/(1+exp2)
+        decay1 += 1/(1+exp2) # TODO：没有定义
     return decay
-def np_ode(states, t, parameters, fijt, population):
-    #print(t, states[0])
-    sz = states.shape[0] // 5
-    us = states[:sz]
-    cs = states[sz:2*sz]
-    ss = states[2*sz:3*sz]
-    interval = parameters['interval']
-    tidx = int(t * interval)
-    if tidx >= len(fijt):
-        fij = fijt[len(fijt)-1]
-    else:
-        fij = fijt[tidx]
-    uterm = (us * population).dot(fij) / population - us * np.sum(fij,1)
-    sterm = (ss * population).dot(fij) / population - ss * np.sum(fij,1)
-    beta = parameters['beta']
-    t_c = parameters['tc']
-    t_r = parameters['tr']
-    alphas = parameters['alphas']
-    cross_term = beta * us * ss * intervention(parameters, t)
-    #cross_term = beta * us * ss
-    delta_u = cross_term - us / t_c + uterm
-    delta_c = alphas * us / t_c - cs / t_r 
-    delta_s = - cross_term + sterm
-    domestic = cross_term
-    virus_influx = (us * population).dot(fij) / population
-    output = np.r_[delta_u, delta_c, delta_s, virus_influx, domestic]
-    #records1.append(np.r_[delta_u, delta_c, delta_s])
-    #records2.append(np.r_[us, cs, ss])
-    return output
 def single_np_ode(state, t, parameters, population):
     us = state[0] # un-comfirmed cases?
     cs = state[1] # comfirmed cases?
@@ -196,6 +167,36 @@ class COVID19:
         return self.influence_matrix[t].T[self.nodes[name],:].sum()
         # TODO
         #return -1
+    
+    def _np_ode(self, states, t, parameters, fijt, population):
+        #print(t, states[0])
+        sz = states.shape[0] // 5
+        us = states[:sz]
+        cs = states[sz:2*sz]
+        ss = states[2*sz:3*sz]
+        interval = parameters['interval']
+        tidx = int(t * interval)
+        if tidx >= len(fijt):
+            fij = fijt[len(fijt)-1]
+        else:
+            fij = fijt[tidx]
+        uterm = (us * population).dot(fij) / population - us * np.sum(fij,1)
+        sterm = (ss * population).dot(fij) / population - ss * np.sum(fij,1)
+        beta = parameters['beta']
+        t_c = parameters['tc']
+        t_r = parameters['tr']
+        alphas = parameters['alphas']
+        cross_term = beta * us * ss * intervention(parameters, t)
+        #cross_term = beta * us * ss
+        delta_u = cross_term - us / t_c + uterm
+        delta_c = alphas * us / t_c - cs / t_r 
+        delta_s = - cross_term + sterm
+        domestic = cross_term
+        virus_influx = (us * population).dot(fij) / population
+        output = np.r_[delta_u, delta_c, delta_s, virus_influx, domestic]
+        #records1.append(np.r_[delta_u, delta_c, delta_s])
+        #records2.append(np.r_[us, cs, ss])
+        return output
 
     def _name_combine(self, flowdata, casedata, populationdata):
         # 首先，我们要校准各个国家的名称，做法是分别把航空流量数据、国家人口数据和病例数据中的国家字段都加载进来，统一转换为标准国家名称
@@ -465,18 +466,19 @@ class COVID19:
         constants = {'beta': r0 / t_c, 'tc': t_c, 'tr': t_r, 'interval': 1,'tstar':0,'epsilon':0.001,'lambds2':0}
 
 
-        us00 = self.all_trajectories[-1, :,0]
+        us00 = self.all_trajectories[-1, :,0] # -1 --> 用最后的状态作为初始态
         cs00 = self.all_trajectories[-1, :,1]
         ss00 = 1 - us00 - cs00
         virus_influx0 = np.zeros(len(self.nodes))
         domestic_flux0 = np.zeros(len(self.nodes))
         initial_states = np.r_[us00,cs00,ss00,virus_influx0,domestic_flux0]
-        params = constants
-        params['beta'] = betas
-        params['alphas'] = alphas
-        params['t0s'] = t0s + epidemic_start_time
-        params['lambds'] = lambds
-        self.result = odeint(np_ode, initial_states, timespan, args = (params, self.fijt, self.population))
+        self.params = constants
+        self.params['beta'] = betas
+        self.params['alphas'] = alphas
+        self.params['t0s'] = t0s + epidemic_start_time
+        self.params['lambds'] = lambds
+        #self.params = params
+        self.result = odeint(self._np_ode, initial_states, timespan, args = (self.params, self.fijt, self.population))
         self.simulateQ = True
 
 
